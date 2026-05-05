@@ -14,25 +14,28 @@ df = df.drop(columns=['date'])
 
 # normalize data to [0,1] range
 # Min-Max scaling
-scaler = MinMaxScaler()
-scaled_data = scaler.fit_transform(df)
+normalizer = MinMaxScaler()
+normalized_data = normalizer.fit_transform(df)
 
 # creation of sequences
 # using 30 days to predict next day temperature
-def create_sequences(data, seq_length):
-    X, y = [], []
-    for i in range(len(data) - seq_length):
-        X.append(data[i:i+seq_length])
-        y.append(data[i+seq_length][0])
-    return np.array(X), np.array(y)
+def build_sequences(data, sequence):
+    inputs, targets = [], []
+    for start in range(len(data) - sequence):
+        end = start + sequence
+        inputs.append(data[start:end])
+        targets.append(data[end][0])
+    return np.array(inputs), np.array(targets)
 
-SEQ_LENGTH = 30
-X, y = create_sequences(scaled_data, SEQ_LENGTH)
+SEQUENCE = 30
+X, y = build_sequences(normalized_data, SEQUENCE)
 
 # train/test split 80/20
-split = int(len(X) * 0.8)
-X_train, X_test = X[:split], X[split:]
-y_train, y_test = y[:split], y[split:]
+split_data = int(len(X) * 0.8)
+training_X = X[:split_data]
+testing_X = X[split_data:]
+training_y = y[:split_data]
+testing_y = y[split_data:]
 
 # RNN implementation
 class RNN:
@@ -43,26 +46,29 @@ class RNN:
         scale = 0.01 # initialize weights
         
         # hidden layer weights
-        self.Wx = np.random.randn(hidden_size, input_size) * scale
-        self.Wh = np.random.randn(hidden_size, hidden_size) * scale
-        self.bh = np.zeros((hidden_size, 1))
+        self.W_input = np.random.randn(hidden_size, input_size) * scale
+        self.W_hidden = np.random.randn(hidden_size, hidden_size) * scale
+        self.b_hidden = np.zeros((hidden_size, 1))
 
         # output layer weights
-        self.Wy = np.random.randn(output_size, hidden_size) * scale
-        self.by = np.zeros((output_size, 1))
+        self.W_output = np.random.randn(output_size, hidden_size) * scale
+        self.b_output = np.zeros((output_size, 1))
 
     # forward pass
     def forward(self, X):
         seq_length = X.shape[0]
-        h = np.zeros((self.hidden_size, 1)) # initial hidden state
-        self.inputs, self.hiddens = [], [h]
+        current_hidden = np.zeros((self.hidden_size, 1))
+        self.input_cache = []
+        self.hidden_state = [current_hidden]
 
-        for t in range(seq_length):
-            xt = X[t].reshape(-1, 1) 
-            h = np.tanh(self.Wx @ xt + self.Wh @ h + self.bh)
-            self.inputs.append(xt)
-            self.hiddens.append(h)
-        y_pred = self.Wy @ h + self.by
+        for time_step in range(seq_length):
+            current_input = X[time_step].reshape(-1, 1) 
+            current_hidden = np.tanh(self.W_input @ current_input + self.W_hidden @ current_hidden + self.b_hidden)
+            self.input_cache.append(current_input)
+            self.hidden_state.append(current_hidden)
+
+        # final output prediction
+        y_pred = self.W_output @ current_hidden + self.b_output
         return y_pred.flatten()[0]
     
     # backward pass
@@ -70,63 +76,65 @@ class RNN:
         error = y_pred - y_true
 
         # output layer gradients
-        dWy = error * self.hiddens[-1].T
-        dby = error
+        W_grad_output = error * self.hidden_state[-1].T
+        b_grad_output = error
 
         # backpropagation through time (BPTT)
-        dWx = np.zeros_like(self.Wx)
-        dWh = np.zeros_like(self.Wh)
-        dbh = np.zeros_like(self.bh)
-        dh_next = self.Wy.T * error
-        
-        for t in reversed(range(len(self.inputs))):
-            dh = dh_next * (1  -self.hiddens[t+1] ** 2)
-            dbh += dh
-            dWx += dh @ self.inputs[t].T
-            dWh += dh @ self.hiddens[t].T
-            dh_next = self.Wh.T @ dh
+        W_grad_input = np.zeros(self.W_input.shape)
+        W_grad_hidden = np.zeros(self.W_hidden.shape)
+        b_grad_hidden = np.zeros(self.b_hidden.shape)
+        hidden_grad_next = self.W_output.T * error
+
+        # backpropagate through time steps
+        for time_step in reversed(range(len(self.input_cache))):
+            # tanh derivative
+            dh = hidden_grad_next * (1  -self.hidden_state[time_step+1] ** 2)
+            b_grad_hidden += dh
+            W_grad_input += dh @ self.input_cache[time_step].T
+            W_grad_hidden += dh @ self.hidden_state[time_step].T
+            hidden_grad_next = self.W_hidden.T @ dh
 
         # gradient clipping
         # prevents exploding gradients
-        dWx = np.clip(dWx, -1, 1)
-        dWh = np.clip(dWh, -1, 1)
-        dbh = np.clip(dbh, -1, 1)
-        dWy = np.clip(dWy, -1, 1)
-        dby = np.clip(dby, -1, 1)
+        W_grad_input = np.clip(W_grad_input, -1, 1)
+        W_grad_hidden = np.clip(W_grad_hidden, -1, 1)
+        b_grad_hidden = np.clip(b_grad_hidden, -1, 1)
+        W_grad_output = np.clip(W_grad_output, -1, 1)
+        b_grad_output = np.clip(b_grad_output, -1, 1)
 
         # updating weights
-        self.Wx -= self.learning_rate * dWx
-        self.Wh -= self.learning_rate * dWh
-        self.bh -= self.learning_rate * dbh
-        self.Wy -= self.learning_rate * dWy
-        self.by -= self.learning_rate * dby
+        self.W_input -= self.learning_rate * W_grad_input
+        self.W_hidden -= self.learning_rate * W_grad_hidden
+        self.b_hidden -= self.learning_rate * b_grad_hidden
+        self.W_output -= self.learning_rate * W_grad_output
+        self.b_output -= self.learning_rate * b_grad_output
 
     # training
     def train(self, X_train, y_train, epochs=50):
-        losses = []
+        epoch_losses = []
 
         for epoch in range(epochs):
-            total_loss = 0
+            cumulative_loss = 0
             for j in range(len(X_train)):
-                y_pred = self.forward(X_train[j])
-                loss = (y_pred - y_train[j]) ** 2
-                total_loss += loss
-                self.backward(y_pred, y_train[j])
-            avg_loss = total_loss / len(X_train)
-            losses.append(avg_loss)
+                y_pred = self.forward(X_train[j]) # forward pass
+                sample_loss = (y_pred - y_train[j]) ** 2
+                cumulative_loss += sample_loss
+                self.backward(y_pred, y_train[j]) # backward pass
+            avg_epoch_loss = cumulative_loss / len(X_train)
+            epoch_losses.append(avg_epoch_loss)
 
             if (epoch % 10 == 0):
-                print (f"Epoch: {epoch }, Loss: {avg_loss:.4f}")
+                print (f"Epoch: {epoch }, Loss: {avg_epoch_loss:.4f}")
 
-        return losses
-        
+        return epoch_losses
+
     # prediction
     def predict(self, X_test):
-        predictions = []
+        all_predictions = []
         for j in range(len(X_test)):
             y_pred = self.forward(X_test[j])
-            predictions.append(y_pred)
-        return np.array(predictions)
+            all_predictions.append(y_pred)
+        return np.array(all_predictions)
 
 
 
@@ -142,25 +150,27 @@ rnn = RNN(input_size=4, hidden_size=64, output_size=1, learning_rate=0.005)
 # expirement 2
 #losses = rnn.train(X_train, y_train, epochs=100)
 # expirement 3
-losses = rnn.train(X_train, y_train, epochs=200)
+training_losses = rnn.train(training_X, training_y, epochs=200)
 
-predictions = rnn.predict(X_test)
+test_predictions = rnn.predict(testing_X)
 
 # calculate train and test rmse
-train_predictions = rnn.predict(X_train)
-train_mse = mean_squared_error(y_train, train_predictions)
+train_predictions = rnn.predict(training_X)
+train_mse = mean_squared_error(training_y, train_predictions)
 train_rmse = np.sqrt(train_mse)
 print(f"Train RMSE: {train_rmse:.4f}")
 
-mse = mean_squared_error(y_test, predictions)
-rmse = np.sqrt(mse)
-print(f"Test RMSE: {rmse:.4f}")
+test_mse = mean_squared_error(testing_y, test_predictions)
+test_rmse = np.sqrt(test_mse)
+print(f"Test RMSE: {test_rmse:.4f}")
 
-
+# rmse to celsius
+celsius = test_rmse * (df['meantemp'].max() - df['meantemp'].min())
+print(f"Test RMSE in Celsius: {celsius:.2f} °C")
 
 # plot loss
 plt.figure(figsize=(12, 4))
-plt.plot(losses)
+plt.plot(training_losses)
 plt.title('Training Loss Over Epochs')
 plt.xlabel('Epoch')
 plt.ylabel('MSE Loss')
@@ -168,18 +178,14 @@ plt.show()
 
 # plot predictions vs actual
 plt.figure(figsize=(12, 4))
-plt.plot(y_test, label='Actual')
-plt.plot(predictions, label='Predicted')
+plt.plot(testing_y, label='Actual')
+plt.plot(test_predictions, label='Predicted')
 plt.title('Predicted vs Actual Temperature')
 plt.xlabel('Day')
 plt.ylabel('Normalized Temperature')
 plt.legend()
 plt.show()
 
-print(f"Training Samples: {len(X_train)}")
-print(f"Test Samples: {len(X_test)}")
-print(f"Input Shape: {X_train.shape}")
-
-# rmse to celsius
-celsius = rmse * (df['meanpressure'].max() - df['meanpressure'].min())
-print(f"Test RMSE in Celsius: {celsius:.2f} °C")
+print(f"Training Samples: {len(training_X)}")
+print(f"Test Samples: {len(testing_X)}")
+print(f"Input Shape: {training_X.shape}")
